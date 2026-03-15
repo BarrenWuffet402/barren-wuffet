@@ -153,7 +153,7 @@ def fetch_stock_data(ticker: str) -> dict:
 # ── Ask Barren to score and project yields ──────────────────────────────────
 def barren_analyse(data: dict) -> dict:
     # Load persona
-    soul_path = os.path.expanduser("~/barren-wuffet/persona/SOUL.md")
+    soul_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "persona", "SOUL.md")
     with open(soul_path) as f:
         soul = f.read()
     prompt = f"""
