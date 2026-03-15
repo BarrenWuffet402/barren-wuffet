@@ -63,7 +63,22 @@ EDGAR_CIKS = {
     "CVX":  "0000093410",
 }
 
-# ── Nordic IR pages for PDF scraping ─────────────────────────────────────────
+# ── Nordic: hardcoded direct PDF URLs (IR pages are JS-rendered) ─────────────
+# Update these annually when new reports are published (~Feb-Apr)
+DIRECT_PDF_URLS = {
+    "EQNR.OL": "https://cdn.equinor.com/files/h61q9gi9/global/16ccbc5a098c3b971979118420c4f83ddee18fb4.pdf",
+    "DNB.OL":   "https://www.ir.dnb.no/sites/default/files/pr/202503192798-2-1.pdf",
+    "GJF.OL":   "https://www.gjensidige.com/files/content-innhold/konsern-filer/annual-reports/Annual%20report%202024.pdf",
+    "ORK.OL":   "https://www.orkla.com/files/mfn/7f0f329a-2944-4496-aec4-b6068d0c6b5c/orkla-annual-report-2024.pdf",
+    "TEL.OL":   "https://www.telenor.com/binaries/investors/reports-and-information/annual/annual-report-2024/Annual-Report-2024_English.pdf",
+    "MOWI.OL":  "https://mowi.com/wp-content/uploads/2025/03/Mowi-Integrated-Annual-Report-2024.pdf",
+    "STB.OL":   "https://www.storebrand.no/en/investor-relations/annual-reports/_/attachment/inline/f7268ecb-0b2b-44e3-b264-bb93a0a06afa:afbfc17fd8ac42a515a6a48fb54eaec364e37ae0/2024-annual-report-storebrand-asa.pdf",
+    "YAR.OL":   "https://www.yara.com/siteassets/investors/057-reports-and-presentations/annual-reports/2024/yara-integrated-report-2024.pdf",
+    "SALM.OL":  "https://ml-eu.globenewswire.com/Resource/Download/1da20c9a-09bb-4d58-8e81-72f7942be36f",
+    "AKRBP.OL": "https://akerbp.com/wp-content/uploads/2025/04/annual-report-2024.pdf",
+}
+
+# ── Nordic IR pages (fallback scraping — most are JS-rendered) ────────────────
 IR_PAGES = {
     "EQNR.OL": "https://www.equinor.com/investors/annual-report",
     "AKRBP.OL": "https://akerbp.com/en/investors/reports-and-presentations/annual-reports/",
@@ -144,28 +159,34 @@ def _get_edgar_text(ticker: str) -> Optional[str]:
             cells = row.find_all("td")
             if len(cells) >= 4:
                 doc_type = cells[3].get_text(strip=True)
-                if doc_type == "10-K":
+                if "10-K" in doc_type and "EX" not in doc_type:
                     a = cells[2].find("a")
                     if a and a.get("href"):
                         doc_url = "https://www.sec.gov" + a["href"]
                         break
 
         if not doc_url:
-            # Fallback: first htm link in the index
+            # Fallback: largest .htm file in the index (usually the main 10-K)
+            htm_links = []
             for a in soup.find_all("a", href=True):
-                if a["href"].endswith(".htm") and accno_clean in a["href"]:
-                    doc_url = "https://www.sec.gov" + a["href"]
-                    break
+                href = a["href"]
+                if href.endswith(".htm") and accno_clean in href:
+                    htm_links.append("https://www.sec.gov" + href)
+            if htm_links:
+                doc_url = htm_links[0]
 
         if not doc_url:
             print(f"    ⚠️  Could not locate 10-K document for {ticker}")
             return None
 
-        # 5. Download and extract text
+        # 5. Download and extract text (strip iXBRL namespace noise from start)
         print(f"    📥  Fetching 10-K from EDGAR...")
         doc_r = requests.get(doc_url, headers=EDGAR_HEADERS, timeout=60)
         doc_r.raise_for_status()
-        text = BeautifulSoup(doc_r.text, "html.parser").get_text(separator="\n")
+        raw = BeautifulSoup(doc_r.text, "html.parser").get_text(separator="\n")
+        # iXBRL files start with XBRL metadata; find first real sentence
+        match = re.search(r'[A-Z][a-z]{3,}.{20,}', raw[2000:])
+        text = raw[2000 + match.start():] if match else raw
         print(f"    ✅  Got {len(text):,} chars of 10-K text")
         return text
 
@@ -324,9 +345,9 @@ def get_annual_report_data(ticker: str, company_name: str = "") -> dict:
     if ticker in EDGAR_CIKS:
         text = _get_edgar_text(ticker)
 
-    # Nordic: IR page scraping
-    elif ticker in IR_PAGES:
-        pdf_url = _find_pdf_on_page(IR_PAGES[ticker], target_years)
+    # Nordic: hardcoded direct URL first, fallback to IR page scraping
+    elif ticker in DIRECT_PDF_URLS or ticker in IR_PAGES:
+        pdf_url = DIRECT_PDF_URLS.get(ticker) or _find_pdf_on_page(IR_PAGES.get(ticker, ""), target_years)
         if not pdf_url:
             print(f"    ⚠️  No PDF found for {ticker}")
             return {}
