@@ -1,16 +1,12 @@
 """
 barren_annual_reports.py
 ────────────────────────────────────────────────────────────────────────────
-For each supported ticker:
-  1. Scrapes the investor-relations page for the most recent annual report PDF.
-  2. Downloads and caches the PDF locally (reports/<TICKER>_<YEAR>.pdf).
-  3. Extracts text with pdfplumber, prioritising dividend/FCF/risk sections.
-  4. Sends extracted text to Claude for structured metric extraction.
-  5. Caches the result as reports/<TICKER>_<YEAR>.json — no re-fetch until
-     a newer annual report year is detected.
+Two discovery strategies:
+  • US stocks  → SEC EDGAR (free public API, no scraping, no blocks)
+  • Nordic stocks → IR page scraping + PDF download + pdfplumber
 
-Integration: call get_annual_report_data(ticker) from barren_scorer.py and
-merge the returned dict into the Claude scoring prompt.
+Both paths feed text to Claude for structured metric extraction, with full
+JSON caching so we only re-fetch when a new annual report year is available.
 """
 
 import os
@@ -27,14 +23,14 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
-client   = Anthropic()
-BASE     = os.path.dirname(os.path.abspath(__file__))
-REPORTS  = os.path.join(BASE, "reports")
+client  = Anthropic()
+BASE    = os.path.dirname(os.path.abspath(__file__))
+REPORTS = os.path.join(BASE, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
 CURRENT_YEAR = datetime.now().year
 
-HEADERS = {
+BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -42,10 +38,33 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+# EDGAR requires a descriptive User-Agent per their policy
+EDGAR_HEADERS = {
+    "User-Agent": "BarrenWuffettResearch research@barrenwuffett.com",
+    "Accept":     "application/json",
+}
 
-# ── Investor Relations pages ─────────────────────────────────────────────────
+# ── US tickers → SEC EDGAR CIK numbers ───────────────────────────────────────
+EDGAR_CIKS = {
+    "JNJ":  "0000200406",
+    "KO":   "0000021344",
+    "PG":   "0000080424",
+    "MMM":  "0000066740",
+    "CL":   "0000021665",
+    "ABT":  "0000001800",
+    "EMR":  "0000032604",
+    "GPC":  "0000040987",
+    "PEP":  "0000077476",
+    "T":    "0000732717",
+    "VZ":   "0000732712",
+    "MCD":  "0000063908",
+    "WMT":  "0000104169",
+    "XOM":  "0000034088",
+    "CVX":  "0000093410",
+}
+
+# ── Nordic IR pages for PDF scraping ─────────────────────────────────────────
 IR_PAGES = {
-    # Nordic
     "EQNR.OL": "https://www.equinor.com/investors/annual-report",
     "AKRBP.OL": "https://akerbp.com/en/investors/reports-and-presentations/annual-reports/",
     "DNB.OL":   "https://www.dnb.no/en/about-us/investor-relations/annual-reports.html",
@@ -56,40 +75,114 @@ IR_PAGES = {
     "STB.OL":   "https://www.storebrand.no/en/investor-relations/reports-and-presentations/",
     "YAR.OL":   "https://www.yara.com/investor-relations/reports-and-publications/annual-reports/",
     "SALM.OL":  "https://www.salmar.no/en/investor-relations/reports-and-presentations/",
-    # US Aristocrats
-    "JNJ":  "https://investor.jnj.com/annual-reports-and-proxies",
-    "KO":   "https://investors.coca-colacompany.com/financial-information/annual-reports",
-    "PG":   "https://pginvestor.com/financial-reporting/annual-reports-proxies/default.aspx",
-    "MMM":  "https://investors.3m.com/financial-information/annual-reports",
-    "CL":   "https://investor.colgatepalmolive.com/financial-information/annual-reports",
-    "ABT":  "https://investors.abbott.com/financial-information/annual-reports/default.aspx",
-    "EMR":  "https://www.emerson.com/en-us/investors/financial-reports",
-    "GPC":  "https://investor.genpt.com/financial-information/annual-reports",
-    "PEP":  "https://www.pepsico.com/investors/financial-information/annual-reports",
-    "T":    "https://investors.att.com/financial-information/annual-reports",
-    "VZ":   "https://www.verizon.com/about/investors/annual-reports",
-    "MCD":  "https://corporate.mcdonalds.com/corpmcd/investors/annual-report.html",
-    "WMT":  "https://stock.walmart.com/financial-information/annual-reports-and-proxies",
-    "XOM":  "https://investor.exxonmobil.com/financial-information/annual-reports",
-    "CVX":  "https://www.chevron.com/investors/annual-report",
 }
+
+# Terms that indicate annual report content (English + Norwegian)
+ANNUAL_TERMS = [
+    "annual", "annual-report", "annualreport",
+    "årsrapport", "årsberetning", "årsmelding",
+]
 
 KEYWORDS = [
     "dividend", "cash flow", "free cash", "payout", "guidance", "outlook",
     "capital allocation", "debt", "covenant", "net debt", "leverage",
-    "earnings per share", "sustainability", "risk factor", "forward",
+    "earnings per share", "sustainability", "risk factor",
 ]
 
 
-# ── PDF discovery ─────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _safe_ticker(ticker: str) -> str:
+    return ticker.replace(".", "_").replace("/", "-")
+
+def _json_path(ticker: str, year: int) -> str:
+    return os.path.join(REPORTS, f"{_safe_ticker(ticker)}_{year}.json")
+
+def _pdf_path(ticker: str, year: int) -> str:
+    return os.path.join(REPORTS, f"{_safe_ticker(ticker)}_{year}.pdf")
+
+
+# ── Strategy A: SEC EDGAR for US stocks ──────────────────────────────────────
+
+def _get_edgar_text(ticker: str) -> Optional[str]:
+    """Fetch the most recent 10-K text from SEC EDGAR."""
+    cik = EDGAR_CIKS.get(ticker)
+    if not cik:
+        return None
+
+    cik_int = str(int(cik))  # strip leading zeros for URL paths
+
+    try:
+        # 1. Get submission metadata
+        sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        r = requests.get(sub_url, headers=EDGAR_HEADERS, timeout=15)
+        r.raise_for_status()
+        filings = r.json()["filings"]["recent"]
+
+        # 2. Find the most recent 10-K
+        accno = None
+        for form, date, acc in zip(filings["form"], filings["filingDate"], filings["accessionNumber"]):
+            if form == "10-K":
+                accno = acc
+                print(f"    📑  Found 10-K filing: {date}")
+                break
+
+        if not accno:
+            print(f"    ⚠️  No 10-K found on EDGAR for {ticker}")
+            return None
+
+        # 3. Get filing index to find the main document
+        accno_clean = accno.replace("-", "")
+        index_url   = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accno_clean}/{accno}-index.htm"
+        idx_r = requests.get(index_url, headers=EDGAR_HEADERS, timeout=15)
+        idx_r.raise_for_status()
+        soup  = BeautifulSoup(idx_r.text, "html.parser")
+
+        # 4. Find the main 10-K document (htm/html, not exhibit)
+        doc_url = None
+        for row in soup.select("table tr"):
+            cells = row.find_all("td")
+            if len(cells) >= 4:
+                doc_type = cells[3].get_text(strip=True)
+                if doc_type == "10-K":
+                    a = cells[2].find("a")
+                    if a and a.get("href"):
+                        doc_url = "https://www.sec.gov" + a["href"]
+                        break
+
+        if not doc_url:
+            # Fallback: first htm link in the index
+            for a in soup.find_all("a", href=True):
+                if a["href"].endswith(".htm") and accno_clean in a["href"]:
+                    doc_url = "https://www.sec.gov" + a["href"]
+                    break
+
+        if not doc_url:
+            print(f"    ⚠️  Could not locate 10-K document for {ticker}")
+            return None
+
+        # 5. Download and extract text
+        print(f"    📥  Fetching 10-K from EDGAR...")
+        doc_r = requests.get(doc_url, headers=EDGAR_HEADERS, timeout=60)
+        doc_r.raise_for_status()
+        text = BeautifulSoup(doc_r.text, "html.parser").get_text(separator="\n")
+        print(f"    ✅  Got {len(text):,} chars of 10-K text")
+        return text
+
+    except Exception as e:
+        print(f"    ❌  EDGAR fetch failed for {ticker}: {e}")
+        return None
+
+
+# ── Strategy B: IR page scraping + PDF for Nordic ────────────────────────────
 
 def _find_pdf_on_page(ir_url: str, target_years: list) -> Optional[str]:
-    """Scrape an IR page and return the URL of the best annual report PDF."""
+    """Scrape an IR page for annual report PDF links."""
     try:
-        r = requests.get(ir_url, headers=HEADERS, timeout=15)
+        r = requests.get(ir_url, headers=BROWSER_HEADERS, timeout=15)
         r.raise_for_status()
     except Exception as e:
-        print(f"    ⚠️  Could not fetch IR page: {e}")
+        print(f"    ⚠️  Could not fetch IR page ({e})")
         return None
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -101,23 +194,17 @@ def _find_pdf_on_page(ir_url: str, target_years: list) -> Optional[str]:
         text  = a.get_text(" ", strip=True).lower()
         label = (href + " " + text).lower()
 
-        # Must look like an annual report PDF
         is_pdf    = ".pdf" in label
-        is_annual = any(w in label for w in ["annual", "årsrapport", "annual-report", "annualreport"])
+        is_annual = any(term in label for term in ANNUAL_TERMS)
         if not (is_pdf and is_annual):
             continue
 
-        # Make absolute
-        if href.startswith("http"):
-            abs_url = href
-        else:
-            abs_url = urljoin(base, href)
+        abs_url = href if href.startswith("http") else urljoin(base, href)
 
-        # Score by year mentions
         year_score = 0
         for i, yr in enumerate(target_years):
             if str(yr) in label:
-                year_score = len(target_years) - i  # more points for more recent
+                year_score = len(target_years) - i
                 break
 
         candidates.append((year_score, abs_url))
@@ -129,44 +216,23 @@ def _find_pdf_on_page(ir_url: str, target_years: list) -> Optional[str]:
     return candidates[0][1]
 
 
-# ── PDF download & caching ────────────────────────────────────────────────────
-
-def _safe_ticker(ticker: str) -> str:
-    return ticker.replace(".", "_").replace("/", "-")
-
-
-def _pdf_path(ticker: str, year: int) -> str:
-    return os.path.join(REPORTS, f"{_safe_ticker(ticker)}_{year}.pdf")
-
-
-def _json_path(ticker: str, year: int) -> str:
-    return os.path.join(REPORTS, f"{_safe_ticker(ticker)}_{year}.json")
-
-
 def _download_pdf(url: str, dest: str) -> bool:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=60, stream=True)
+        r = requests.get(url, headers=BROWSER_HEADERS, timeout=60, stream=True)
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 f.write(chunk)
-        size_mb = os.path.getsize(dest) / 1_048_576
-        print(f"    📥  Downloaded {size_mb:.1f} MB → {os.path.basename(dest)}")
+        print(f"    📥  Downloaded {os.path.getsize(dest)/1_048_576:.1f} MB")
         return True
     except Exception as e:
-        print(f"    ❌  Download failed: {e}")
+        print(f"    ❌  PDF download failed: {e}")
         if os.path.exists(dest):
             os.remove(dest)
         return False
 
 
-# ── Text extraction ───────────────────────────────────────────────────────────
-
-def _extract_text(pdf_path: str, max_chars: int = 350_000) -> str:
-    """
-    Extract text from PDF. If the document is very long, keep the first 10 pages
-    (cover/highlights) plus the pages that score highest on dividend/FCF keywords.
-    """
+def _extract_pdf_text(pdf_path: str, max_chars: int = 350_000) -> str:
     try:
         with pdfplumber.open(pdf_path) as pdf:
             pages = []
@@ -179,49 +245,53 @@ def _extract_text(pdf_path: str, max_chars: int = 350_000) -> str:
         if len(full) <= max_chars:
             return full
 
-        # Too long — keep first 10 pages + top-scoring 40 pages
-        first   = pages[:10]
-        rest    = sorted(pages[10:], key=lambda x: x[2], reverse=True)[:40]
+        # Too long: keep first 10 pages + top 40 by keyword density
+        first    = pages[:10]
+        rest     = sorted(pages[10:], key=lambda x: x[2], reverse=True)[:40]
         selected = sorted(first + rest, key=lambda x: x[0])
         return "\n\n".join(f"[PAGE {n}]\n{t}" for n, t, _ in selected)[:max_chars]
-
     except Exception as e:
         return f"[PDF extraction error: {e}]"
+
+
+def _truncate_text(text: str, max_chars: int = 350_000) -> str:
+    """Smart truncation: keep start + highest-density middle sections."""
+    if len(text) <= max_chars:
+        return text
+    # Keep first 50k chars (cover/highlights) + last 300k chars
+    return text[:50_000] + "\n\n[... truncated ...]\n\n" + text[-(max_chars - 50_000):]
 
 
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 _PROMPT = """\
 You are Barren Wuffett's research assistant. Read the following annual report
-extract and return ONLY a valid JSON object — no markdown, no preamble.
+and return ONLY a valid JSON object — no markdown, no preamble.
 
 Extract exactly these fields:
-
 {{
-  "report_year":                      <integer — fiscal year of this report>,
-  "dividend_history":                 <string — recent dividend payments, amounts, trends>,
-  "dividend_policy":                  <string — stated dividend policy or payout targets>,
-  "dividend_sustainability_commentary": <string — what management says about sustaining/growing the dividend>,
-  "free_cash_flow_trend":             <string — FCF figures for the last 2-3 years and direction>,
-  "net_debt":                         <string — net debt level and trend>,
-  "debt_covenants":                   <string — any debt covenants or financial constraints mentioned>,
-  "earnings_guidance":                <string — forward guidance on earnings, revenue, or dividend>,
-  "dividend_risks":                   <string — key risks to dividend continuity mentioned in the report>,
-  "barren_annual_score":              <integer 1-100 — Barren's rating of this report's dividend safety signals>,
-  "barren_annual_notes":              <string — 2-3 sentences of Barren's commentary on these annual report findings>
+  "report_year":                        <integer — fiscal year>,
+  "dividend_history":                   <string — recent dividend amounts and trend>,
+  "dividend_policy":                    <string — stated payout policy or targets>,
+  "dividend_sustainability_commentary": <string — management commentary on sustaining/growing dividend>,
+  "free_cash_flow_trend":               <string — FCF figures for last 2-3 years>,
+  "net_debt":                           <string — net debt level and trend>,
+  "debt_covenants":                     <string — any debt covenants or financial constraints>,
+  "earnings_guidance":                  <string — forward guidance on earnings or dividend>,
+  "dividend_risks":                     <string — key risks to dividend continuity>,
+  "barren_annual_score":                <integer 1-100 — dividend safety rating>,
+  "barren_annual_notes":                <string — 2-3 sentences Barren commentary on findings>
 }}
 
 ANNUAL REPORT TEXT:
 {text}
 """
 
-
-def _analyse_with_claude(ticker: str, company_name: str, text: str) -> dict:
-    prompt = _PROMPT.format(text=text[:300_000])
+def _analyse_with_claude(text: str) -> dict:
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": _PROMPT.format(text=text)}],
     )
     raw = response.content[0].text.strip()
     raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
@@ -232,80 +302,91 @@ def _analyse_with_claude(ticker: str, company_name: str, text: str) -> dict:
 
 def get_annual_report_data(ticker: str, company_name: str = "") -> dict:
     """
-    Returns structured annual report data for a ticker.
-    Uses cache if available; fetches and analyses only when a newer report is needed.
-    Returns {} if the ticker has no IR page or all fetches fail.
+    Returns structured annual report data. Uses cache if available.
+    US tickers use SEC EDGAR; Nordic tickers scrape IR pages for PDFs.
+    Returns {} if nothing can be retrieved.
     """
-    if ticker not in IR_PAGES:
-        return {}
-
-    # Try most recent year first (reports published ~Q1 of following year)
     target_years = [CURRENT_YEAR - 1, CURRENT_YEAR - 2]
 
-    # Check cache — use newest year we have on disk
+    # Check cache
     for year in target_years:
         jp = _json_path(ticker, year)
         if os.path.exists(jp):
-            print(f"    📋  Using cached annual report ({ticker} {year})")
+            print(f"    📋  Using cached report ({ticker} {year})")
             with open(jp) as f:
                 return json.load(f)
 
-    # No cache — fetch
-    print(f"    🔍  Searching for annual report PDF for {ticker}...")
-    ir_url  = IR_PAGES[ticker]
-    pdf_url = _find_pdf_on_page(ir_url, target_years)
+    print(f"    🔍  Fetching annual report for {ticker}...")
+    text = None
+    year = target_years[0]
 
-    if not pdf_url:
-        print(f"    ⚠️  No annual report PDF found for {ticker}")
-        return {}
+    # US: SEC EDGAR
+    if ticker in EDGAR_CIKS:
+        text = _get_edgar_text(ticker)
 
-    # Determine year from URL or default to CURRENT_YEAR-1
-    year = CURRENT_YEAR - 1
-    for yr in target_years:
-        if str(yr) in pdf_url:
-            year = yr
-            break
-
-    pdf_dest = _pdf_path(ticker, year)
-    if not os.path.exists(pdf_dest):
-        if not _download_pdf(pdf_url, pdf_dest):
+    # Nordic: IR page scraping
+    elif ticker in IR_PAGES:
+        pdf_url = _find_pdf_on_page(IR_PAGES[ticker], target_years)
+        if not pdf_url:
+            print(f"    ⚠️  No PDF found for {ticker}")
             return {}
 
-    print(f"    🔬  Extracting and analysing {ticker} {year} annual report...")
-    text   = _extract_text(pdf_dest)
-    result = {}
+        for yr in target_years:
+            if str(yr) in pdf_url:
+                year = yr
+                break
 
+        pdf_dest = _pdf_path(ticker, year)
+        if not os.path.exists(pdf_dest):
+            if not _download_pdf(pdf_url, pdf_dest):
+                return {}
+
+        text = _extract_pdf_text(pdf_dest)
+
+    if not text:
+        return {}
+
+    print(f"    🤖  Analysing with Claude...")
     try:
-        result = _analyse_with_claude(ticker, company_name, text)
-        result["source_url"] = pdf_url
+        result = _analyse_with_claude(_truncate_text(text))
+        result["source"]     = "EDGAR" if ticker in EDGAR_CIKS else "IR page"
         result["fetched_at"] = datetime.now().isoformat()
 
         with open(_json_path(ticker, year), "w") as f:
             json.dump(result, f, indent=2)
-        print(f"    ✅  Annual report data saved for {ticker} {year}")
+        print(f"    ✅  Saved report data ({ticker} {year})")
 
     except Exception as e:
-        print(f"    ❌  Claude analysis failed for {ticker}: {e}")
+        print(f"    ❌  Claude analysis failed: {e}")
+        return {}
 
-    time.sleep(1)  # polite pause between API calls
+    time.sleep(1)
     return result
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from barren_scorer import NORDIC
+    import sys
+    from barren_scorer import NORDIC, US_ARISTOCRATS
+
+    tickers_map = {t: "Nordic" for t in NORDIC}
+    tickers_map.update({t: "US" for t in US_ARISTOCRATS})
+
+    # Allow passing specific tickers on the command line
+    targets = sys.argv[1:] if len(sys.argv) > 1 else list(tickers_map.keys())
 
     print("=" * 60)
     print("  BARREN — Annual Report Analyser")
-    print("  Starting with Nordic watchlist")
+    print(f"  Processing {len(targets)} tickers")
     print("=" * 60)
 
-    for ticker in NORDIC:
-        print(f"\n📄 {ticker}")
+    for ticker in targets:
+        print(f"\n📄 {ticker} ({tickers_map.get(ticker, '?')})")
         data = get_annual_report_data(ticker)
         if data:
-            print(f"   Score: {data.get('barren_annual_score', '—')}/100")
-            print(f"   Notes: {data.get('barren_annual_notes', '—')[:120]}...")
+            print(f"   Score : {data.get('barren_annual_score', '—')}/100")
+            print(f"   Policy: {str(data.get('dividend_policy', '—'))[:100]}")
+            print(f"   Notes : {str(data.get('barren_annual_notes', '—'))[:150]}")
         else:
             print("   No data retrieved.")
