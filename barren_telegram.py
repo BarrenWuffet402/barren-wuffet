@@ -62,16 +62,16 @@ def broadcast_top_picks(json_file="scan_results.json", min_score=60):
     picks = [r for r in results if r.get("barren_score", 0) >= min_score]
 
     if not picks:
-        send_message("🧪 Barren here — scanned the Nordic markets today and nothing met my exacting dividend standards. The search continues, my friends!")
+        send_message("🧪 Barren here — scanned the global markets today and nothing met my exacting dividend standards. The search continues, my friends!")
         return
 
     # Send intro message
-    send_message(f"""🧪 <b>BARREN WUFFETT — NORDIC SCAN COMPLETE</b>
+    send_message(f"""🧪 <b>BARREN WUFFETT — GLOBAL SCAN COMPLETE</b>
 
-My magnificent dividend-sniffing algorithms have completed their Nordic patrol!
+My magnificent dividend-sniffing algorithms have completed their global patrol!
 
 Found <b>{len(picks)} worthy picks</b> out of {len(results)} stocks scanned.
-Sending full certificates now... 🔬""")
+Sending full research notes now... 🔬""")
 
     # Send one message per pick
     import time

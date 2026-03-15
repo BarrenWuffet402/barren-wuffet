@@ -3,6 +3,8 @@ import json
 import threading
 from flask import Flask, render_template_string, send_file, abort
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 load_dotenv()
 
@@ -53,9 +55,32 @@ def _bootstrap():
                 print("✅ Certificates generated.")
             except Exception as e:
                 print(f"❌ Certificate generation failed: {e}")
+
+        print("📣 Broadcasting to Telegram...")
+        try:
+            from barren_telegram import broadcast_top_picks
+            broadcast_top_picks(json_file=RESULTS)
+            print("✅ Telegram broadcast sent.")
+        except Exception as e:
+            print(f"❌ Telegram broadcast failed: {e}")
     finally:
         if os.path.exists(lock):
             os.remove(lock)
+
+
+def _daily_scan():
+    """Full scan + certificates + Telegram — runs on schedule."""
+    print("⏰ Daily scan triggered by scheduler...")
+    # Force re-scan by temporarily removing results
+    if os.path.exists(RESULTS):
+        os.remove(RESULTS)
+    _bootstrap()
+
+
+# ── Daily scheduler — 07:30 Oslo time ────────────────────────────────────────
+_scheduler = BackgroundScheduler(timezone="Europe/Oslo")
+_scheduler.add_job(_daily_scan, CronTrigger(hour=7, minute=30))
+_scheduler.start()
 
 
 # Kick off bootstrap in background so gunicorn starts immediately
