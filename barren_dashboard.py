@@ -21,30 +21,41 @@ def _bootstrap():
     if not needs_scan and not needs_certs:
         return
 
+    # Lock file prevents duplicate bootstrap if Railway runs two instances simultaneously
+    lock = os.path.join(BASE, ".bootstrap.lock")
+    if os.path.exists(lock):
+        print("⏳ Bootstrap already running in another process — skipping.")
+        return
+    open(lock, "w").close()
+
     print("🚀 Bootstrap: generating missing data...")
 
-    if needs_scan:
-        print("📡 Running stock scan (this takes a few minutes)...")
-        try:
-            import sys
-            sys.path.insert(0, BASE)
-            from barren_scorer import run_scan, WATCHLIST
-            results = run_scan(WATCHLIST)
-            with open(RESULTS, "w") as f:
-                json.dump(results, f, indent=2)
-            print(f"✅ Scan complete — {len(results)} stocks saved.")
-        except Exception as e:
-            print(f"❌ Scan failed: {e}")
-            return
+    try:
+        if needs_scan:
+            print("📡 Running stock scan (this takes a few minutes)...")
+            try:
+                import sys
+                sys.path.insert(0, BASE)
+                from barren_scorer import run_scan, WATCHLIST
+                results = run_scan(WATCHLIST)
+                with open(RESULTS, "w") as f:
+                    json.dump(results, f, indent=2)
+                print(f"✅ Scan complete — {len(results)} stocks saved.")
+            except Exception as e:
+                print(f"❌ Scan failed: {e}")
+                return
 
-    if needs_certs:
-        print("🎨 Generating certificates...")
-        try:
-            from barren_certificate import generate_all_certificates
-            generate_all_certificates(json_file=RESULTS, output_dir=CERTS)
-            print("✅ Certificates generated.")
-        except Exception as e:
-            print(f"❌ Certificate generation failed: {e}")
+        if needs_certs:
+            print("🎨 Generating certificates...")
+            try:
+                from barren_certificate import generate_all_certificates
+                generate_all_certificates(json_file=RESULTS, output_dir=CERTS)
+                print("✅ Certificates generated.")
+            except Exception as e:
+                print(f"❌ Certificate generation failed: {e}")
+    finally:
+        if os.path.exists(lock):
+            os.remove(lock)
 
 
 # Kick off bootstrap in background so gunicorn starts immediately
