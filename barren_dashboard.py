@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 from flask import Flask, render_template_string, send_file, abort
 from dotenv import load_dotenv
 
@@ -10,6 +11,44 @@ app = Flask(__name__)
 BASE    = os.path.dirname(os.path.abspath(__file__))
 RESULTS = os.path.join(BASE, "scan_results.json")
 CERTS   = os.path.join(BASE, "certificates")
+
+
+def _bootstrap():
+    """Run on startup: generate scan_results.json and certificates if missing."""
+    needs_scan  = not os.path.exists(RESULTS) or os.path.getsize(RESULTS) < 10
+    needs_certs = not os.path.isdir(CERTS) or len([f for f in os.listdir(CERTS) if f.endswith(".pdf")]) == 0
+
+    if not needs_scan and not needs_certs:
+        return
+
+    print("🚀 Bootstrap: generating missing data...")
+
+    if needs_scan:
+        print("📡 Running stock scan (this takes a few minutes)...")
+        try:
+            import sys
+            sys.path.insert(0, BASE)
+            from barren_scorer import run_scan, WATCHLIST
+            results = run_scan(WATCHLIST)
+            with open(RESULTS, "w") as f:
+                json.dump(results, f, indent=2)
+            print(f"✅ Scan complete — {len(results)} stocks saved.")
+        except Exception as e:
+            print(f"❌ Scan failed: {e}")
+            return
+
+    if needs_certs:
+        print("🎨 Generating certificates...")
+        try:
+            from barren_certificate import generate_all_certificates
+            generate_all_certificates(json_file=RESULTS, output_dir=CERTS)
+            print("✅ Certificates generated.")
+        except Exception as e:
+            print(f"❌ Certificate generation failed: {e}")
+
+
+# Kick off bootstrap in background so gunicorn starts immediately
+threading.Thread(target=_bootstrap, daemon=True).start()
 
 def load_results():
     if not os.path.exists(RESULTS):
@@ -221,6 +260,12 @@ function filterCards(conviction) {
 @app.route("/")
 def index():
     results  = load_results()
+    if not results:
+        return ("<html><body style='font-family:sans-serif;text-align:center;padding:80px;"
+                "background:#faeeda'><h2>🧪 Barren Wuffett is warming up...</h2>"
+                "<p style='color:#633806;margin-top:16px'>Running the first scan. "
+                "Check back in a few minutes.</p>"
+                "<script>setTimeout(()=>location.reload(),30000)</script></body></html>"), 202
     buys     = sum(1 for r in results if r.get("conviction_rating") in ("BUY", "STRONG BUY"))
     avg_yield = round(sum(r.get("dividend_yield", 0) for r in results) / max(len(results), 1), 2)
     avg_5yr   = round(sum(r.get("projected_yield_5y", 0) for r in results) / max(len(results), 1), 2)
