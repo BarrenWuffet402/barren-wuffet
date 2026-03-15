@@ -157,19 +157,20 @@ def barren_analyse(data: dict) -> dict:
     with open(soul_path) as f:
         soul = f.read()
 
-    # Optionally enrich with annual report data
+    # Optionally enrich with annual report data (disabled on Railway to save memory)
     annual_section = ""
-    try:
-        from barren_annual_reports import get_annual_report_data
-        annual = get_annual_report_data(data["ticker"], data.get("name", ""))
-        if annual:
-            annual_section = f"""
+    if not os.getenv("RAILWAY_ENVIRONMENT"):
+        try:
+            from barren_annual_reports import get_annual_report_data
+            annual = get_annual_report_data(data["ticker"], data.get("name", ""))
+            if annual:
+                annual_section = f"""
 
 ANNUAL REPORT ANALYSIS (use this to deepen your scoring):
 {json.dumps(annual, indent=2)}
 """
-    except Exception:
-        pass  # annual reports are optional enrichment — never block scoring
+        except Exception:
+            pass  # annual reports are optional enrichment — never block scoring
 
     prompt = f"""
 You are Barren Wuffett. Your full identity and rules are below:
