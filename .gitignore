@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Data & generated files (updated locally, not tracked in git)
+scan_results.json
+certificates/
+
+# Runtime
+logs/
+*.pid
+*.log
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS
+.DS_Store
