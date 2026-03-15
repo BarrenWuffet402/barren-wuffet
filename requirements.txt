@@ -7,3 +7,5 @@ pandas==2.3.3
 reportlab==4.4.10
 requests==2.32.3
 apscheduler==3.11.2
+pdfplumber==0.11.8
+beautifulsoup4==4.14.3

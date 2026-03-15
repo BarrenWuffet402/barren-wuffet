@@ -4,6 +4,7 @@
 # Data & generated files (updated locally, not tracked in git)
 scan_results.json
 certificates/
+reports/
 
 # Runtime
 logs/

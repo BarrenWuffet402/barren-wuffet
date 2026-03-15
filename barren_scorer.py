@@ -156,6 +156,21 @@ def barren_analyse(data: dict) -> dict:
     soul_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "persona", "SOUL.md")
     with open(soul_path) as f:
         soul = f.read()
+
+    # Optionally enrich with annual report data
+    annual_section = ""
+    try:
+        from barren_annual_reports import get_annual_report_data
+        annual = get_annual_report_data(data["ticker"], data.get("name", ""))
+        if annual:
+            annual_section = f"""
+
+ANNUAL REPORT ANALYSIS (use this to deepen your scoring):
+{json.dumps(annual, indent=2)}
+"""
+    except Exception:
+        pass  # annual reports are optional enrichment — never block scoring
+
     prompt = f"""
 You are Barren Wuffett. Your full identity and rules are below:
 
@@ -167,6 +182,7 @@ Analyse this stock and return ONLY a valid JSON object. No preamble, no markdown
 
 STOCK DATA:
 {json.dumps(data, indent=2)}
+{annual_section}
 
 Return this exact JSON structure:
 {{
