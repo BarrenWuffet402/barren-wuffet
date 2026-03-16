@@ -10,9 +10,10 @@ load_dotenv()
 
 app = Flask(__name__)
 
-BASE    = os.path.dirname(os.path.abspath(__file__))
-RESULTS = os.path.join(BASE, "scan_results.json")
-CERTS   = os.path.join(BASE, "certificates")
+BASE      = os.path.dirname(os.path.abspath(__file__))
+RESULTS   = os.path.join(BASE, "scan_results.json")
+CERTS     = os.path.join(BASE, "certificates")
+DEEP_DIR  = os.path.join(BASE, "certificates", "deep")
 
 
 def _bootstrap():
@@ -388,6 +389,36 @@ NORWAY_HTML = """
 
   .no-data { text-align: center; padding: 60px; color: #888780; }
 
+  /* Deep analysis cards */
+  .deep-section { margin-bottom: 28px; }
+  .deep-section h2 { font-size: 15px; font-weight: 600; color: #412402;
+                     margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .deep-cards { display: flex; gap: 16px; flex-wrap: wrap; }
+  .deep-card { background: white; border: 1px solid #d3d1c7; border-radius: 10px;
+               overflow: hidden; width: 240px; transition: transform 0.2s, box-shadow 0.2s; }
+  .deep-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+  .deep-card-header { background: #412402; padding: 12px 14px; }
+  .deep-card-header .ticker { font-size: 13px; font-weight: 700; color: #faeeda; }
+  .deep-card-header .name   { font-size: 11px; color: #c9a96e; margin-top: 2px;
+                               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .deep-card-body { padding: 12px 14px; }
+  .deep-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+  .deep-metric { font-size: 11px; }
+  .deep-metric .label { color: #888780; }
+  .deep-metric .value { font-weight: 600; color: #2c2c2a; }
+  .deep-metric .value.green { color: #04342c; }
+  .deep-metric .value.amber { color: #412402; }
+  .deep-metric .value.red   { color: #501313; }
+  .deep-conviction { display: inline-block; padding: 2px 10px; border-radius: 10px;
+                     font-size: 11px; font-weight: 600; margin-bottom: 10px; }
+  .dc-STRONG-BUY, .dc-BUY  { background: #e1f5ee; color: #04342c; }
+  .dc-WATCH                 { background: #faeeda; color: #412402; }
+  .dc-AVOID                 { background: #fcebeb; color: #501313; }
+  .deep-btn { display: block; text-align: center; padding: 7px; background: #412402;
+              color: white; border-radius: 6px; font-size: 12px; text-decoration: none;
+              transition: background 0.2s; }
+  .deep-btn:hover { background: #633806; }
+
   footer { text-align: center; padding: 32px; color: #888780; font-size: 12px;
            border-top: 1px solid #d3d1c7; margin-top: 20px; }
 </style>
@@ -404,6 +435,62 @@ NORWAY_HTML = """
 </nav>
 
 <div class="page-body">
+
+  {% if deep_analyses %}
+  <div class="deep-section">
+    <h2>🔬 Deep Analysis Reports
+      <span style="font-size:12px;font-weight:400;color:#888780;">
+        — full 5-model valuation · fritaksmetoden tax profiles · annual report intelligence
+      </span>
+    </h2>
+    <div class="deep-cards">
+    {% for d in deep_analyses %}
+      <div class="deep-card">
+        <div class="deep-card-header">
+          <div class="ticker">{{ d.ticker.replace('.OL','') }}</div>
+          <div class="name">{{ d.name }}</div>
+        </div>
+        <div class="deep-card-body">
+          <div class="deep-conviction dc-{{ d.conviction.replace(' ','-') }}">
+            {{ d.conviction }}
+          </div>
+          <div class="deep-metrics">
+            <div class="deep-metric">
+              <div class="label">Deep Score</div>
+              <div class="value amber">{{ d.deep_score }}/100</div>
+            </div>
+            <div class="deep-metric">
+              <div class="label">Current Yield</div>
+              <div class="value green">{{ d.yield_pct }}%</div>
+            </div>
+            <div class="deep-metric">
+              <div class="label">Fair Value Mid</div>
+              <div class="value">{{ d.fv_mid }} NOK</div>
+            </div>
+            <div class="deep-metric">
+              <div class="label">Margin of Safety</div>
+              <div class="value {% if d.mos and d.mos > 10 %}green{% elif d.mos and d.mos < 0 %}red{% else %}amber{% endif %}">
+                {{ d.mos_str }}
+              </div>
+            </div>
+            <div class="deep-metric">
+              <div class="label">5yr APY</div>
+              <div class="value green">{{ d.yield_5y }}%</div>
+            </div>
+            <div class="deep-metric">
+              <div class="label">Policy Clarity</div>
+              <div class="value">{{ d.policy_clarity }}/10</div>
+            </div>
+          </div>
+          <a href="/norway/deep/{{ d.ticker }}" class="deep-btn" target="_blank">
+            📄 Open Deep Certificate
+          </a>
+        </div>
+      </div>
+    {% endfor %}
+    </div>
+  </div>
+  {% endif %}
 
   <div class="intro">
     <h2>🇳🇴 Oslo Børs — Fritaksmetoden Qualifying Stocks</h2>
@@ -594,6 +681,52 @@ def certificate(ticker):
                            mimetype="application/pdf")
     abort(404)
 
+def load_deep_analyses():
+    """Scan certificates/deep/ for available deep analysis results."""
+    if not os.path.isdir(DEEP_DIR):
+        return []
+    analyses = []
+    for fname in sorted(os.listdir(DEEP_DIR)):
+        if not fname.endswith(".pdf"):
+            continue
+        # Derive ticker from filename: BW_DEEP_DNB_OL_... → DNB.OL
+        parts = fname.replace("BW_DEEP_", "").split("_")
+        if len(parts) >= 2:
+            raw = parts[0] + "_" + parts[1]   # e.g. DNB_OL
+            ticker = raw.replace("_", ".", 1)  # DNB.OL
+        else:
+            continue
+
+        # Try to load the JSON result for metrics
+        json_path = os.path.join(BASE, "reports", f"{ticker.replace('.','_')}_deep_result.json")
+        meta = {"ticker": ticker, "name": ticker, "conviction": "—",
+                "deep_score": "—", "yield_pct": "—", "fv_mid": "—",
+                "mos": None, "mos_str": "—", "yield_5y": "—", "policy_clarity": "—"}
+        if os.path.exists(json_path):
+            try:
+                with open(json_path) as f:
+                    d = json.load(f)
+                scores  = d.get("scores", {})
+                val     = d.get("valuation", {})
+                annual  = d.get("annual", {})
+                mos     = val.get("margin_of_safety_pct")
+                meta.update({
+                    "name":           d.get("name", ticker),
+                    "conviction":     scores.get("conviction_rating", "—"),
+                    "deep_score":     scores.get("barren_deep_score", "—"),
+                    "yield_pct":      round(d.get("dividend_yield", 0), 2),
+                    "fv_mid":         val.get("fv_mid", "—"),
+                    "mos":            mos,
+                    "mos_str":        f"{mos:+.1f}%" if mos is not None else "—",
+                    "yield_5y":       scores.get("projected_yield_5y", "—"),
+                    "policy_clarity": annual.get("dividend_policy_clarity_score", "—"),
+                })
+            except Exception:
+                pass
+        analyses.append(meta)
+    return analyses
+
+
 @app.route("/norway")
 def norway():
     from norway_data import fetch_oslo_data, CACHE
@@ -613,14 +746,27 @@ def norway():
     last_updated = datetime.fromtimestamp(mtime).strftime("%d %b %Y %H:%M") if mtime else "Never"
 
     return render_template_string(NORWAY_HTML,
-        stocks       = stocks,
-        total        = len(stocks),
-        paying       = paying,
-        avg_yield    = avg_yield,
-        avg_pe       = avg_pe,
-        sectors      = sectors,
-        last_updated = last_updated,
+        stocks         = stocks,
+        total          = len(stocks),
+        paying         = paying,
+        avg_yield      = avg_yield,
+        avg_pe         = avg_pe,
+        sectors        = sectors,
+        last_updated   = last_updated,
+        deep_analyses  = load_deep_analyses(),
     )
+
+
+@app.route("/norway/deep/<ticker>")
+def norway_deep_cert(ticker):
+    """Serve a deep analysis PDF certificate."""
+    safe = ticker.replace(".", "_").replace("/", "-")
+    if os.path.isdir(DEEP_DIR):
+        for fname in os.listdir(DEEP_DIR):
+            if fname.startswith(f"BW_DEEP_{safe}") and fname.endswith(".pdf"):
+                return send_file(os.path.join(DEEP_DIR, fname),
+                                 as_attachment=False, mimetype="application/pdf")
+    abort(404)
 
 
 @app.route("/norway/refresh")
