@@ -1,7 +1,7 @@
 import os
 import json
 import threading
-from flask import Flask, render_template_string, send_file, abort
+from flask import Flask, render_template_string, send_file, abort, jsonify
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -189,6 +189,12 @@ HTML = """
 
   footer { text-align: center; padding: 32px; color: #888780; font-size: 12px;
            border-top: 1px solid #d3d1c7; margin-top: 20px; }
+
+  nav { background: #412402; display: flex; gap: 0; }
+  nav a { color: #faeeda; padding: 10px 22px; font-size: 13px; font-weight: 500;
+          text-decoration: none; letter-spacing: 0.5px; transition: background 0.2s; }
+  nav a:hover { background: #633806; }
+  nav a.active { background: #633806; border-bottom: 2px solid #fac775; }
 </style>
 </head>
 <body>
@@ -198,6 +204,10 @@ HTML = """
   <p>Autonomous dividend intelligence · Global markets</p>
   <p class="tagline">"The dividends, my friend, are blowin' in the wind!"</p>
 </header>
+<nav>
+  <a href="/" class="active">Global</a>
+  <a href="/norway">🇳🇴 Norway</a>
+</nav>
 
 <div class="stats">
   <div class="stat">
@@ -293,6 +303,259 @@ function filterCards(conviction) {
 </html>
 """
 
+NORWAY_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Norway — Barren Wuffett Capital Research</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f8f6f0; color: #2c2c2a; line-height: 1.6; }
+
+  header { background: #faeeda; border-bottom: 2px solid #ba7517; padding: 24px 40px; }
+  header h1 { font-size: 28px; font-weight: 600; color: #412402; }
+  header p  { color: #633806; font-size: 14px; margin-top: 4px; }
+
+  nav { background: #412402; display: flex; gap: 0; }
+  nav a { color: #faeeda; padding: 10px 22px; font-size: 13px; font-weight: 500;
+          text-decoration: none; letter-spacing: 0.5px; transition: background 0.2s; }
+  nav a:hover { background: #633806; }
+  nav a.active { background: #633806; border-bottom: 2px solid #fac775; }
+
+  .page-body { padding: 28px 40px; }
+
+  .intro { background: white; border: 1px solid #d3d1c7; border-radius: 10px;
+           padding: 18px 22px; margin-bottom: 24px; max-width: 860px; }
+  .intro h2 { font-size: 16px; color: #412402; margin-bottom: 6px; }
+  .intro p  { font-size: 13px; color: #5f5e5a; line-height: 1.6; }
+  .intro .highlight { background: #eaf3de; display: inline-block; padding: 2px 8px;
+                      border-radius: 4px; font-weight: 600; color: #173404; font-size: 12px; }
+
+  .controls { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  .filter-input { padding: 7px 14px; border: 1px solid #d3d1c7; border-radius: 6px;
+                  font-size: 13px; width: 220px; background: white; }
+  .filter-input:focus { outline: none; border-color: #ba7517; }
+  .sector-select { padding: 7px 14px; border: 1px solid #d3d1c7; border-radius: 6px;
+                   font-size: 13px; background: white; cursor: pointer; }
+  .refresh-btn { margin-left: auto; padding: 7px 16px; background: #412402; color: white;
+                 border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
+                 text-decoration: none; transition: background 0.2s; }
+  .refresh-btn:hover { background: #633806; }
+  .last-updated { font-size: 12px; color: #888780; }
+
+  table { width: 100%; border-collapse: collapse; background: white;
+          border-radius: 10px; overflow: hidden; border: 1px solid #d3d1c7;
+          font-size: 13px; }
+  thead th { background: #412402; color: #faeeda; padding: 12px 14px;
+             text-align: left; font-weight: 600; font-size: 12px;
+             letter-spacing: 0.5px; white-space: nowrap; cursor: pointer;
+             user-select: none; }
+  thead th:hover { background: #633806; }
+  thead th .sort-arrow { margin-left: 4px; opacity: 0.5; }
+  thead th.sorted .sort-arrow { opacity: 1; }
+
+  tbody tr { border-bottom: 1px solid #f1efe8; transition: background 0.15s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: #fdf9f2; }
+  tbody td { padding: 11px 14px; vertical-align: middle; }
+
+  .ticker-col { font-weight: 700; color: #412402; font-size: 13px; }
+  .name-col   { color: #2c2c2a; }
+  .sector-badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+                  font-size: 11px; background: #faeeda; color: #633806; white-space: nowrap; }
+  .metric { font-weight: 600; color: #2c2c2a; }
+  .metric.yield-high { color: #04342c; }
+  .metric.yield-mid  { color: #412402; }
+  .metric.yield-low  { color: #888780; }
+  .metric.good { color: #04342c; }
+  .metric.warn { color: #854f0b; }
+  .metric.bad  { color: #501313; }
+  .na { color: #c5c3bb; font-size: 12px; }
+
+  .fritaks-badge { display: inline-block; font-size: 10px; background: #e1f5ee;
+                   color: #04342c; padding: 2px 6px; border-radius: 4px;
+                   font-weight: 600; }
+
+  .summary-row { display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap; }
+  .summary-stat { background: white; border: 1px solid #d3d1c7; border-radius: 8px;
+                  padding: 14px 20px; text-align: center; min-width: 130px; }
+  .summary-stat .num   { font-size: 26px; font-weight: 700; color: #412402; }
+  .summary-stat .label { font-size: 11px; color: #888780; text-transform: uppercase;
+                         letter-spacing: 0.8px; margin-top: 2px; }
+
+  .no-data { text-align: center; padding: 60px; color: #888780; }
+
+  footer { text-align: center; padding: 32px; color: #888780; font-size: 12px;
+           border-top: 1px solid #d3d1c7; margin-top: 20px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🧪 Barren Wuffett Capital Research</h1>
+  <p>Autonomous dividend intelligence · Oslo Stock Exchange</p>
+</header>
+<nav>
+  <a href="/">Global</a>
+  <a href="/norway" class="active">🇳🇴 Norway</a>
+</nav>
+
+<div class="page-body">
+
+  <div class="intro">
+    <h2>🇳🇴 Oslo Børs — Fritaksmetoden Qualifying Stocks</h2>
+    <p>
+      All stocks below are incorporated in Norway or the EEA, listed on Oslo Stock Exchange,
+      and qualify under <strong>fritaksmetoden</strong> for Norwegian AS companies.
+      Dividends and capital gains are <span class="highlight">~97 % tax-free</span>
+      (only 3 % included in taxable income → effective rate ~0.66 % at 22 % corporate tax).
+      Foreign-incorporated companies (Bermuda, Cayman, etc.) are excluded even if traded on Oslo Børs.
+    </p>
+  </div>
+
+  <div class="summary-row">
+    <div class="summary-stat">
+      <div class="num">{{ total }}</div>
+      <div class="label">Stocks</div>
+    </div>
+    <div class="summary-stat">
+      <div class="num">{{ paying }}</div>
+      <div class="label">Paying dividends</div>
+    </div>
+    <div class="summary-stat">
+      <div class="num">{{ avg_yield }}%</div>
+      <div class="label">Avg yield</div>
+    </div>
+    <div class="summary-stat">
+      <div class="num">{{ avg_pe }}x</div>
+      <div class="label">Avg P/E</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input class="filter-input" type="text" id="searchInput"
+           placeholder="Search company or ticker..." onkeyup="applyFilters()">
+    <select class="sector-select" id="sectorFilter" onchange="applyFilters()">
+      <option value="">All sectors</option>
+      {% for s in sectors %}
+      <option value="{{ s }}">{{ s }}</option>
+      {% endfor %}
+    </select>
+    <span class="last-updated">Updated: {{ last_updated }}</span>
+    <a href="/norway/refresh" class="refresh-btn">↻ Refresh data</a>
+  </div>
+
+  <table id="norwayTable">
+    <thead>
+      <tr>
+        <th onclick="sortTable(0)">Ticker <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable(1)">Company <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable(2)">Sector <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable(3)" title="Current dividend yield">Yield % <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable(4)" title="Trailing 12-month Price/Earnings">P/E <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable(5)" title="Price to Book Value">P/B <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable(6)" title="Total Debt / Equity (%)">D/E % <span class="sort-arrow">↕</span></th>
+        <th onclick="sortTable(7)" title="Return on Equity">ROE % <span class="sort-arrow">↕</span></th>
+        <th title="Fritaksmetoden">Fritaks</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody">
+    {% for r in stocks %}
+    <tr data-sector="{{ r.sector }}" data-name="{{ r.name|lower }} {{ r.ticker|lower }}">
+      <td class="ticker-col">{{ r.ticker.replace('.OL','') }}</td>
+      <td class="name-col">{{ r.name }}</td>
+      <td><span class="sector-badge">{{ r.sector }}</span></td>
+
+      <td class="metric {% if r.dividend_yield and r.dividend_yield >= 5 %}yield-high{% elif r.dividend_yield and r.dividend_yield >= 2 %}yield-mid{% else %}yield-low{% endif %}"
+          data-val="{{ r.dividend_yield or 0 }}">
+        {% if r.dividend_yield %}{{ "%.1f"|format(r.dividend_yield) }}%{% else %}<span class="na">—</span>{% endif %}
+      </td>
+
+      <td class="metric {% if r.pe_ratio and r.pe_ratio < 15 %}good{% elif r.pe_ratio and r.pe_ratio > 25 %}warn{% endif %}"
+          data-val="{{ r.pe_ratio or 999 }}">
+        {% if r.pe_ratio %}{{ "%.1f"|format(r.pe_ratio) }}x{% else %}<span class="na">—</span>{% endif %}
+      </td>
+
+      <td class="metric {% if r.pb_ratio and r.pb_ratio < 1.5 %}good{% elif r.pb_ratio and r.pb_ratio > 4 %}warn{% endif %}"
+          data-val="{{ r.pb_ratio or 999 }}">
+        {% if r.pb_ratio %}{{ "%.2f"|format(r.pb_ratio) }}{% else %}<span class="na">—</span>{% endif %}
+      </td>
+
+      <td class="metric {% if r.debt_to_equity is not none and r.debt_to_equity < 50 %}good{% elif r.debt_to_equity is not none and r.debt_to_equity > 150 %}warn{% endif %}"
+          data-val="{{ r.debt_to_equity if r.debt_to_equity is not none else 999 }}">
+        {% if r.debt_to_equity is not none %}{{ "%.0f"|format(r.debt_to_equity) }}{% else %}<span class="na">—</span>{% endif %}
+      </td>
+
+      <td class="metric {% if r.roe and r.roe >= 15 %}good{% elif r.roe and r.roe < 5 %}warn{% endif %}"
+          data-val="{{ r.roe or 0 }}">
+        {% if r.roe %}{{ "%.1f"|format(r.roe) }}%{% else %}<span class="na">—</span>{% endif %}
+      </td>
+
+      <td><span class="fritaks-badge">✓ EEA</span></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <p style="font-size:11px;color:#888780;margin-top:12px;">
+    <strong>Metrics explained:</strong>
+    Yield = current dividend yield · P/E = price/earnings (lower = cheaper) ·
+    P/B = price/book (below 1.5 = value territory) ·
+    D/E = debt-to-equity % (lower = stronger balance sheet) ·
+    ROE = return on equity (above 15 % = excellent).
+    Green = favourable · Amber = elevated · Data from Yahoo Finance, refreshed every 6 h.
+  </p>
+
+</div>
+
+<footer>
+  © 2026 Barren Wuffett Capital Research · Powered by Claude AI · Not financial advice
+</footer>
+
+<script>
+let sortDir = {};
+
+function sortTable(col) {
+  const tbody = document.getElementById('tableBody');
+  const rows  = Array.from(tbody.querySelectorAll('tr:not([style*="none"])'));
+  const asc   = !sortDir[col];
+  sortDir     = {};
+  sortDir[col] = asc;
+
+  rows.sort((a, b) => {
+    let aVal = a.cells[col].getAttribute('data-val') ?? a.cells[col].textContent.trim();
+    let bVal = b.cells[col].getAttribute('data-val') ?? b.cells[col].textContent.trim();
+    const aNum = parseFloat(aVal), bNum = parseFloat(bVal);
+    if (!isNaN(aNum) && !isNaN(bNum)) return asc ? aNum - bNum : bNum - aNum;
+    return asc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+  });
+
+  rows.forEach(r => tbody.appendChild(r));
+
+  document.querySelectorAll('thead th').forEach((th, i) => {
+    th.classList.toggle('sorted', i === col);
+    const arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = i === col ? (asc ? '↑' : '↓') : '↕';
+  });
+}
+
+function applyFilters() {
+  const search = document.getElementById('searchInput').value.toLowerCase();
+  const sector = document.getElementById('sectorFilter').value;
+  document.querySelectorAll('#tableBody tr').forEach(row => {
+    const matchSearch = !search || row.dataset.name.includes(search);
+    const matchSector = !sector || row.dataset.sector === sector;
+    row.style.display = matchSearch && matchSector ? '' : 'none';
+  });
+}
+</script>
+</body>
+</html>
+"""
+
 @app.route("/")
 def index():
     results  = load_results()
@@ -330,6 +593,44 @@ def certificate(ticker):
                            as_attachment=False,
                            mimetype="application/pdf")
     abort(404)
+
+@app.route("/norway")
+def norway():
+    from norway_data import fetch_oslo_data, CACHE
+    stocks = fetch_oslo_data()
+
+    paying   = sum(1 for s in stocks if s.get("dividend_yield"))
+    yields   = [s["dividend_yield"] for s in stocks if s.get("dividend_yield")]
+    pes      = [s["pe_ratio"]       for s in stocks if s.get("pe_ratio")]
+    avg_yield = round(sum(yields) / len(yields), 1) if yields else 0
+    avg_pe    = round(sum(pes) / len(pes), 1)       if pes    else 0
+
+    sectors = sorted(set(s["sector"] for s in stocks if s.get("sector")))
+
+    import os as _os
+    from datetime import datetime
+    mtime = _os.path.getmtime(CACHE) if _os.path.exists(CACHE) else 0
+    last_updated = datetime.fromtimestamp(mtime).strftime("%d %b %Y %H:%M") if mtime else "Never"
+
+    return render_template_string(NORWAY_HTML,
+        stocks       = stocks,
+        total        = len(stocks),
+        paying       = paying,
+        avg_yield    = avg_yield,
+        avg_pe       = avg_pe,
+        sectors      = sectors,
+        last_updated = last_updated,
+    )
+
+
+@app.route("/norway/refresh")
+def norway_refresh():
+    """Force-refresh Oslo data and redirect back."""
+    from flask import redirect
+    from norway_data import fetch_oslo_data
+    fetch_oslo_data(force=True)
+    return redirect("/norway")
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
